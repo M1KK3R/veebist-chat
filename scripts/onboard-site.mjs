@@ -4,19 +4,20 @@
  *
  *   node scripts/onboard-site.mjs
  *
- * Prompts for site slug + display name + URL, then via the Chatwoot API:
- *   1. Creates a Website-channel inbox
- *   2. Assigns the bot agent to it
- *   3. (optional) Adds you as collaborator
- *   4. Creates bot/knowledge/<slug>.md from the example template
+ * Prompts for site slug + display name + URL + backend config, then:
+ *   1. Creates a Chatwoot Website-channel inbox (via API)
+ *   2. Assigns the bot agent + adds you as collaborator
+ *   3. Creates bot/knowledge/<slug>.md from the example template
+ *   4. Appends a per-site env block to chatwoot/.env so the bot's live
+ *      catalog snapshot starts working for this site
  *   5. Prints the .env snippet to paste into the new site
  *
- * Required env (in .env at repo root):
- *   CHATWOOT_URL                  e.g. https://chat.veebist.cloud
- *   CHATWOOT_API_TOKEN            personal admin access token
- *   CHATWOOT_ACCOUNT_ID           e.g. 2
- *   ONBOARD_BOT_AGENT_ID          (optional) agent id of the Veebist AI bot to assign
- *   ONBOARD_COLLABORATOR_USER_ID  (optional) your user id, added to the inbox so mobile shows it
+ * Required env (in chatwoot/.env at this repo root):
+ *   CHATWOOT_URL                       e.g. https://chat.veebist.cloud
+ *   CHATWOOT_API_TOKEN                 personal admin access token
+ *   CHATWOOT_ACCOUNT_ID                e.g. 2
+ *   ONBOARD_BOT_AGENT_ID               (optional) agent id to assign to the inbox
+ *   ONBOARD_COLLABORATOR_USER_ID       (optional) your user id (adds to inbox so mobile shows it)
  */
 
 import fs from 'node:fs/promises'
@@ -24,9 +25,12 @@ import path from 'node:path'
 import readline from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 
-const envFile = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '.env')
+const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
+const ENV_FILE = path.join(REPO_ROOT, '.env')
+const KNOWLEDGE_DIR = path.join(REPO_ROOT, 'bot', 'knowledge')
+
 try {
-  const txt = await fs.readFile(envFile, 'utf8')
+  const txt = await fs.readFile(ENV_FILE, 'utf8')
   for (const line of txt.split('\n')) {
     const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/)
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^"(.*)"$/, '$1')
@@ -42,12 +46,12 @@ const {
 } = process.env
 
 if (!CHATWOOT_URL || !CHATWOOT_API_TOKEN) {
-  console.error('Set CHATWOOT_URL and CHATWOOT_API_TOKEN in .env first.')
+  console.error('Set CHATWOOT_URL and CHATWOOT_API_TOKEN in chatwoot/.env first.')
   process.exit(1)
 }
 
-function api(path, init = {}) {
-  return fetch(`${CHATWOOT_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}${path}`, {
+function api(p, init = {}) {
+  return fetch(`${CHATWOOT_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}${p}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
@@ -66,21 +70,48 @@ async function ok(res, ctx) {
 }
 
 const rl = readline.createInterface({ input, output })
-const ask = q => rl.question(q).then(s => s.trim())
+const ask = (q, d = '') => rl.question(d ? `${q} [${d}]: ` : `${q}: `).then(s => (s || d).trim())
+const askYN = (q, d = 'Y') => rl.question(`${q} [${d}/${d.toUpperCase() === 'Y' ? 'n' : 'y'}]: `).then(s => {
+  const v = (s || d).toLowerCase()
+  return v === 'y' || v === 'yes'
+})
 
 console.log('\n  Veebist chat — onboard new site\n')
-const slug = await ask('Site slug (e.g. scottest):                 ')
-const displayName = await ask('Display name (e.g. ScottEst Šoti tooted): ')
-const websiteUrl = await ask('Site URL (https://...):                   ')
-const knowledgeSource = (await ask('Knowledge source [markdown/payload]:      ')) || 'markdown'
-const addMe = (await ask('Add yourself as collaborator? [Y/n]:      ')).toLowerCase() !== 'n'
-rl.close()
+
+// ─── identity ────────────────────────────────────────────────
+const slug = await ask('Site slug (lowercase, no spaces — e.g. scottest)')
+const slugUpper = slug.toUpperCase().replace(/[^A-Z0-9]/g, '_')
+const displayName = await ask('Display name (e.g. ScottEst Šoti tooted)')
+const websiteUrl = await ask('Site URL (https://...)')
 
 if (!slug || !displayName || !websiteUrl) {
   console.error('\nslug, display name, and URL are required.')
   process.exit(1)
 }
 
+// ─── backend config for live catalog ─────────────────────────
+console.log('\n--- Live catalog backends (Medusa for products, Payload for articles) ---')
+const useMedusa = await askYN('Does this site have a Medusa storefront?')
+let medusaUrl = '', medusaKey = ''
+if (useMedusa) {
+  medusaUrl = await ask('  Medusa URL', `${websiteUrl}/medusa`)
+  medusaKey = await ask('  Medusa publishable key (pk_...)')
+}
+
+const usePayload = await askYN('Does this site have a Payload CMS?')
+let payloadUrl = ''
+if (usePayload) {
+  payloadUrl = await ask('  Payload API URL', `${websiteUrl}/api`)
+}
+
+const contactEmail = await ask('Contact email shown by bot (optional)', '')
+const contactPhone = await ask('Contact phone shown by bot (optional)', '')
+
+const addMe = await askYN('Add yourself as collaborator on the inbox?')
+
+rl.close()
+
+// ─── Chatwoot inbox creation ─────────────────────────────────
 console.log('\nCreating Chatwoot inbox…')
 const inbox = await ok(await api('/inboxes', {
   method: 'POST',
@@ -90,7 +121,7 @@ const inbox = await ok(await api('/inboxes', {
       type: 'web_widget',
       website_url: websiteUrl,
       welcome_title: 'Tere! Kuidas saame aidata?',
-      welcome_tagline: 'Hi! How can we help?',
+      welcome_tagline: 'AI assistent vastab kohe.',
     },
   }),
 }), 'create inbox')
@@ -108,24 +139,55 @@ if (addMe && ONBOARD_COLLABORATOR_USER_ID) {
   console.log('Adding collaborator…')
   await ok(await api('/inbox_members', {
     method: 'POST',
-    body: JSON.stringify({
-      inbox_id: inbox.id,
-      user_ids: [Number(ONBOARD_COLLABORATOR_USER_ID)],
-    }),
+    body: JSON.stringify({ inbox_id: inbox.id, user_ids: [Number(ONBOARD_COLLABORATOR_USER_ID)] }),
   }), 'add collaborator').catch(e => console.log(`  (skipped: ${e.message})`))
 }
 
-if (knowledgeSource === 'markdown') {
-  const knowledgePath = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bot', 'knowledge', `${slug}.md`)
-  const examplePath = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bot', 'knowledge', 'example.md')
-  let template = ''
-  try { template = await fs.readFile(examplePath, 'utf8') } catch {}
-  await fs.writeFile(knowledgePath, template || `# ${displayName}\n\n(Add FAQ + product/service info for the bot here.)\n`, { flag: 'wx' })
-    .then(() => console.log(`  ✓ Created bot/knowledge/${slug}.md`))
-    .catch(() => console.log(`  (already exists: bot/knowledge/${slug}.md)`))
+// ─── knowledge file from template ────────────────────────────
+const knowledgePath = path.join(KNOWLEDGE_DIR, `${slug}.md`)
+const examplePath = path.join(KNOWLEDGE_DIR, 'example.md')
+let template = ''
+try { template = await fs.readFile(examplePath, 'utf8') } catch {}
+await fs.writeFile(
+  knowledgePath,
+  template || `# ${displayName}\n\n(Add FAQ + business info for the bot here.)\n`,
+  { flag: 'wx' },
+)
+  .then(() => console.log(`  ✓ Created bot/knowledge/${slug}.md`))
+  .catch(() => console.log(`  (already exists: bot/knowledge/${slug}.md)`))
+
+// ─── env block appended to chatwoot/.env ─────────────────────
+const envBlock = []
+envBlock.push('')
+envBlock.push(`# === Site: ${displayName} (added ${new Date().toISOString().slice(0, 10)}) ===`)
+envBlock.push(`${slugUpper}_DISPLAY_NAME=${displayName}`)
+if (medusaUrl) {
+  envBlock.push(`${slugUpper}_MEDUSA_URL=${medusaUrl}`)
+  envBlock.push(`${slugUpper}_MEDUSA_PUBLISHABLE_KEY=${medusaKey}`)
+}
+if (payloadUrl) {
+  envBlock.push(`${slugUpper}_PAYLOAD_URL=${payloadUrl}`)
+}
+if (contactEmail) envBlock.push(`${slugUpper}_CONTACT_EMAIL=${contactEmail}`)
+if (contactPhone) envBlock.push(`${slugUpper}_CONTACT_PHONE=${contactPhone}`)
+
+const existingEnv = await fs.readFile(ENV_FILE, 'utf8').catch(() => '')
+if (existingEnv.includes(`${slugUpper}_MEDUSA_URL=`) || existingEnv.includes(`${slugUpper}_PAYLOAD_URL=`)) {
+  console.log(`  ⚠  chatwoot/.env already has a block for ${slugUpper} — skipping append`)
+} else {
+  await fs.appendFile(ENV_FILE, envBlock.join('\n') + '\n')
+  console.log(`  ✓ Appended ${envBlock.length - 2} env vars to chatwoot/.env`)
+  console.log(`  ↳ Run: cd ${REPO_ROOT} && docker compose --env-file .env restart chat-bot`)
 }
 
-console.log(`\nDone. Add these to the new site's .env:\n`)
+// ─── next-steps printout for the storefront ──────────────────
+console.log(`\n────────── Storefront-side wiring (paste into the new site) ──────────\n`)
+console.log(`  # package.json`)
+console.log(`  "@veebist/chat-widget": "file:../../veebist-platform/packages/chat-widget"\n`)
+console.log(`  # src/app/(frontend)/layout.tsx`)
+console.log(`  import { ChatwootWidget } from '@veebist/chat-widget'`)
+console.log(`  <ChatwootWidget />\n`)
+console.log(`  # .env`)
 console.log(`  NEXT_PUBLIC_CHATWOOT_BASE_URL=${CHATWOOT_URL}`)
-console.log(`  NEXT_PUBLIC_CHATWOOT_WEBSITE_TOKEN=${inbox.website_token}`)
-console.log(`\nThen drop <ChatwootWidget /> in your root layout (from @veebist/chat-widget) and deploy.\n`)
+console.log(`  NEXT_PUBLIC_CHATWOOT_WEBSITE_TOKEN=${inbox.website_token}\n`)
+console.log(`────────── Done. ──────────\n`)

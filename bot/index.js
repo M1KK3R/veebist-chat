@@ -26,6 +26,7 @@ import { getSiteConfig } from './site-config.js'
 import { getSnapshot, snapshotStats } from './catalog/snapshot.js'
 import { formatSnapshotForPrompt } from './catalog/format.js'
 import { consume as consumeRateLimit } from './lib/rate-limit.js'
+import { validateUrls } from './lib/url-validator.js'
 
 const CHATWOOT_URL = process.env.CHATWOOT_URL || 'http://rails:3000'
 const CHATWOOT_API_TOKEN = process.env.CHATWOOT_API_TOKEN || ''
@@ -105,6 +106,22 @@ function buildSystemPrompt(site, knowledge, snapshotMarkdown, siteUrl) {
     `2. The LIVE CATALOG below — live product prices, stock, articles, shipping. Refreshed every 10 min from Medusa + Payload.`,
     `Do not invent products, prices, articles, or shipping rates that are not in the LIVE CATALOG.`,
     ``,
+    `# URL handling — CRITICAL, READ CAREFULLY`,
+    `URLs in the LIVE CATALOG below are **opaque, exact strings**. They are NOT guesses or suggestions you should "improve". They are the verified working URLs for this site.`,
+    ``,
+    `When you cite a URL in your reply: copy the URL byte-for-byte from the catalog. **Do NOT** modify it in any way:`,
+    `* DO NOT change underscores to hyphens (or hyphens to underscores)`,
+    `* DO NOT translate slugs (a slug like "rootsi_keele_kursused" stays exactly that — do not "fix" it to "swedish-language-course" or anything else)`,
+    `* DO NOT lowercase / uppercase characters that you didn't see lowercased/uppercased in the catalog`,
+    `* DO NOT prepend or strip path segments (if the catalog URL is /foo/bar, use exactly /foo/bar — not /bar, not /foo, not /pages/foo/bar)`,
+    `* DO NOT construct URLs from your own knowledge of "typical" URL conventions. Conventions vary per site — the catalog is the source of truth`,
+    ``,
+    `Concrete example — catalog has: "- Rootsi keele kursused — https://scottest.veebist.cloud/rootsi_keele_kursused"`,
+    `  ✓ Correct citation: "[Rootsi keele kursused](https://scottest.veebist.cloud/rootsi_keele_kursused)"`,
+    `  ✗ WRONG: "[Rootsi keele kursused](https://scottest.veebist.cloud/rootsi-keele-kursused)"  ← hyphens! never do this`,
+    ``,
+    `If you cannot find an exact URL for an item in the catalog: write the item name WITHOUT a URL. The visitor can browse the site or search. Do not invent a plausible URL.`,
+    ``,
     `# Sensitive topics`,
     `- Gift card validation / balance: respond "Sisestage kingituskaardi kood ostukorvis — süsteem näitab saldot ja rakendab selle automaatselt." (ET) — DO NOT validate codes or quote balances yourself.`,
     `- Order status, personal account info: ask the visitor to email the contact address shown below with their order number — do not look up orders.`,
@@ -165,15 +182,23 @@ async function handleWebhook(event) {
     chatwoot.fetchHistory(conversationId, 6),
     siteConfig ? getSnapshot(site, siteConfig).catch(err => { log(`snapshot failed:`, err.message); return null }) : Promise.resolve(null),
   ])
-  const snapshotMarkdown = snapshot ? formatSnapshotForPrompt(snapshot, { siteUrl }) : ''
+  const snapshotMarkdown = snapshot ? formatSnapshotForPrompt(snapshot, { siteUrl, urlPatterns: siteConfig?.urlPatterns }) : ''
   const systemPrompt = buildSystemPrompt(site, knowledge, snapshotMarkdown, siteUrl)
   const prompt = buildTranscriptPrompt(systemPrompt, history, content)
 
   log(`conv=${conversationId} site=${site} asking…`)
   try {
     const { reply, providerUsed } = await semaphore.run(() => provider.ask(prompt))
-    await chatwoot.postMessage(conversationId, reply || '...')
-    log(`conv=${conversationId} replied via ${providerUsed} (${reply.length} chars)`)
+    let cleanReply = reply
+    if (snapshot && siteUrl && siteConfig?.urlPatterns) {
+      const { reply: validated, fixes } = validateUrls(reply, snapshot, { siteUrl, urlPatterns: siteConfig.urlPatterns })
+      cleanReply = validated
+      if (fixes.corrected || fixes.removed) {
+        log(`conv=${conversationId} URLs corrected=${fixes.corrected} removed=${fixes.removed} ok=${fixes.ok}`)
+      }
+    }
+    await chatwoot.postMessage(conversationId, cleanReply || '...')
+    log(`conv=${conversationId} replied via ${providerUsed} (${cleanReply.length} chars)`)
   } catch (err) {
     log(`conv=${conversationId} all providers failed`, err.message)
     await chatwoot.postMessage(conversationId, 'Vabandust, väike tehniline tõrge. Edastan küsimuse meie meeskonnale.\n\nApologies, technical issue. I will pass this to our team.')

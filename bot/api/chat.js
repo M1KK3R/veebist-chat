@@ -12,6 +12,7 @@ import fs from 'node:fs/promises'
 import { getSiteConfig } from '../site-config.js'
 import { getSnapshot } from '../catalog/snapshot.js'
 import { formatSnapshotForPrompt } from '../catalog/format.js'
+import { validateUrls } from '../lib/url-validator.js'
 
 const knowledgeCache = new Map()
 const KNOWLEDGE_TTL_MS = 5 * 60_000
@@ -71,18 +72,23 @@ export function createApiChat({ provider, semaphore, expectedToken, knowledgePat
     }
 
     const siteConfig = site ? getSiteConfig(site) : null
+    const siteUrl = payload.siteUrl || ''
     const [knowledge, snapshot] = await Promise.all([
       loadKnowledge(knowledgePath, site),
       siteConfig ? getSnapshot(site, siteConfig).catch(() => null) : Promise.resolve(null),
     ])
-    const snapshotMarkdown = snapshot ? formatSnapshotForPrompt(snapshot, { siteUrl: '' }) : ''
+    const snapshotMarkdown = snapshot ? formatSnapshotForPrompt(snapshot, { siteUrl, urlPatterns: siteConfig?.urlPatterns }) : ''
     const prompt = buildPrompt(messages, knowledge, snapshotMarkdown)
 
     try {
       const { reply, providerUsed } = await semaphore.run(() => provider.ask(prompt))
+      let cleanReply = reply
+      if (snapshot && siteUrl && siteConfig?.urlPatterns) {
+        cleanReply = validateUrls(reply, snapshot, { siteUrl, urlPatterns: siteConfig.urlPatterns }).reply
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ reply, provider: providerUsed }))
-      log?.(`[api-chat] site=${site || '-'} provider=${providerUsed} reply=${reply.length}c`)
+      res.end(JSON.stringify({ reply: cleanReply, provider: providerUsed }))
+      log?.(`[api-chat] site=${site || '-'} provider=${providerUsed} reply=${cleanReply.length}c`)
     } catch (err) {
       log?.('[api-chat] all providers failed:', err.message)
       res.writeHead(503, { 'Content-Type': 'application/json' })

@@ -100,6 +100,10 @@ services:
       dockerfile: Dockerfile
     container_name: chat-bot
     restart: always
+    # env_file passes ALL vars from .env so per-site config (SITE_MEDUSA_URL,
+    # SITE_PAYLOAD_URL, etc.) reaches the bot with zero compose edits when
+    # onboarding new sites via scripts/onboard-site.mjs.
+    env_file: .env
     environment:
       # FORCE_SSL=true on Chatwoot makes Puma 301 every HTTP request to
        # HTTPS, but Puma itself doesn't speak TLS — the upgrade ends in a
@@ -131,15 +135,9 @@ services:
       CHATWOOT_OPENAI_KEY: ${CHATWOOT_OPENAI_KEY:-}
       # Generic /api/chat bearer for external Veebist tools.
       CHAT_BOT_API_TOKEN: ${CHAT_BOT_API_TOKEN:-}
-      # Phase 1 live catalog (Medusa + Payload) — per-site keys below.
-      # Add more blocks when onboarding new sites.
-      SCOTTEST_MEDUSA_URL: ${SCOTTEST_MEDUSA_URL:-}
-      SCOTTEST_MEDUSA_PUBLISHABLE_KEY: ${SCOTTEST_MEDUSA_PUBLISHABLE_KEY:-}
-      SCOTTEST_PAYLOAD_URL: ${SCOTTEST_PAYLOAD_URL:-}
-      SCOTTEST_PAYLOAD_TOKEN: ${SCOTTEST_PAYLOAD_TOKEN:-}
-      SCOTTEST_PRODUCT_LIMIT: ${SCOTTEST_PRODUCT_LIMIT:-}
-      SCOTTEST_ARTICLE_LIMIT: ${SCOTTEST_ARTICLE_LIMIT:-}
-      SCOTTEST_MEDUSA_REGION_ID: ${SCOTTEST_MEDUSA_REGION_ID:-}
+      # Per-site live catalog vars (e.g. SCOTTEST_MEDUSA_URL,
+      # ACME_PAYLOAD_URL, ...) are passed through automatically via the
+      # env_file directive above. No edits needed for new sites.
     volumes:
       # Knowledge per site (markdown files named <inbox-slug>.md)
       - ./bot/knowledge:/app/knowledge:ro

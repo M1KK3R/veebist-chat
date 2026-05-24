@@ -20,8 +20,11 @@ const cache = new Map()
 async function build(siteConfig) {
   const log = (...a) => console.log(new Date().toISOString(), '[snapshot]', siteConfig.displayName, ...a)
 
+  const hasMedusa = !!siteConfig.medusa.url
+  const hasPayload = !!siteConfig.payload.url
+
   let regionId = siteConfig.medusa.regionId
-  if (!regionId) {
+  if (hasMedusa && !regionId) {
     try {
       const regions = await fetchRegions(siteConfig)
       regionId = regions[0]?.id
@@ -32,9 +35,15 @@ async function build(siteConfig) {
   }
 
   const [products, articles, pages] = await Promise.all([
-    fetchProducts(siteConfig, regionId).catch(err => { log('products fetch failed:', err.message); return [] }),
-    fetchArticles(siteConfig).catch(err => { log('articles fetch failed:', err.message); return [] }),
-    fetchPages(siteConfig).catch(err => { log('pages fetch failed:', err.message); return [] }),
+    hasMedusa
+      ? fetchProducts(siteConfig, regionId).catch(err => { log('products fetch failed:', err.message); return [] })
+      : Promise.resolve([]),
+    hasPayload
+      ? fetchArticles(siteConfig).catch(err => { log('articles fetch failed:', err.message); return [] })
+      : Promise.resolve([]),
+    hasPayload
+      ? fetchPages(siteConfig).catch(err => { log('pages fetch failed:', err.message); return [] })
+      : Promise.resolve([]),
   ])
 
   log(`built: ${products.length} products, ${articles.length} articles, ${pages.length} pages`)

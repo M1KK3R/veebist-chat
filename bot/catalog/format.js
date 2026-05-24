@@ -13,19 +13,23 @@ function fmtPrice(amount, currency = 'eur') {
   return `${symbol}${amount.toFixed(2)}`
 }
 
-function productLine(p, baseUrl) {
+function applyPattern(pattern, slug) {
+  return pattern.replace('{handle}', slug).replace('{slug}', slug)
+}
+
+function productLine(p, baseUrl, pattern) {
   const price = p.minPrice === p.maxPrice
     ? fmtPrice(p.minPrice, p.currency)
     : `${fmtPrice(p.minPrice, p.currency)}–${fmtPrice(p.maxPrice, p.currency)}`
   const cats = p.categories.length ? ` [${p.categories.join(', ')}]` : ''
   const stock = p.inStock ? '' : ' (otsas)'
-  const url = baseUrl ? ` — ${baseUrl}/pood/${p.handle}` : ''
+  const url = (baseUrl && pattern) ? ` — ${baseUrl}${applyPattern(pattern, p.handle)}` : ''
   return `- ${p.title} ${price}${cats}${stock}${url}`
 }
 
-function articleLine(a, baseUrl) {
+function articleLine(a, baseUrl, pattern) {
   const date = a.publishedAt ? new Date(a.publishedAt).toISOString().slice(0, 10) : ''
-  const url = baseUrl ? ` — ${baseUrl}/blogi/${a.slug}` : ''
+  const url = (baseUrl && pattern) ? ` — ${baseUrl}${applyPattern(pattern, a.slug)}` : ''
   const excerpt = a.excerpt ? `  ${a.excerpt}` : ''
   return `- ${a.title}${date ? ` (${date})` : ''}${url}${excerpt ? '\n  ' + excerpt : ''}`
 }
@@ -35,7 +39,7 @@ function shippingLine(s) {
   return `- ${s.name}: ${price}`
 }
 
-export function formatSnapshotForPrompt(snapshot, { siteUrl = '' } = {}) {
+export function formatSnapshotForPrompt(snapshot, { siteUrl = '', urlPatterns = {} } = {}) {
   if (!snapshot) return '(no live catalog snapshot)'
 
   const age = Math.round((Date.now() - snapshot.builtAt) / 60_000)
@@ -43,7 +47,7 @@ export function formatSnapshotForPrompt(snapshot, { siteUrl = '' } = {}) {
 
   if (snapshot.products?.length) {
     lines.push('## Tooted (products)')
-    for (const p of snapshot.products) lines.push(productLine(p, siteUrl))
+    for (const p of snapshot.products) lines.push(productLine(p, siteUrl, urlPatterns.product))
     lines.push('')
   }
 
@@ -55,14 +59,14 @@ export function formatSnapshotForPrompt(snapshot, { siteUrl = '' } = {}) {
 
   if (snapshot.articles?.length) {
     lines.push('## Hiljutised artiklid (recent articles)')
-    for (const a of snapshot.articles) lines.push(articleLine(a, siteUrl))
+    for (const a of snapshot.articles) lines.push(articleLine(a, siteUrl, urlPatterns.article))
     lines.push('')
   }
 
   if (snapshot.pages?.length) {
     lines.push('## Lehed (pages)')
     for (const p of snapshot.pages) {
-      const url = siteUrl ? ` — ${siteUrl}/lehed/${p.slug}` : ''
+      const url = (siteUrl && urlPatterns.page) ? ` — ${siteUrl}${applyPattern(urlPatterns.page, p.slug)}` : ''
       lines.push(`- ${p.title}${url}`)
     }
     lines.push('')
