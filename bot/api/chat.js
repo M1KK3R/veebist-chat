@@ -13,6 +13,8 @@ import { getSiteConfig } from '../site-config.js'
 import { getSnapshot } from '../catalog/snapshot.js'
 import { formatSnapshotForPrompt } from '../catalog/format.js'
 import { validateUrls } from '../lib/url-validator.js'
+import { processLookups } from '../lib/tools.js'
+import { sanitizeReply } from '../lib/sanitize.js'
 
 const knowledgeCache = new Map()
 const KNOWLEDGE_TTL_MS = 5 * 60_000
@@ -45,7 +47,7 @@ function buildPrompt(messages, knowledge, snapshotMarkdown) {
   return lines.join('\n')
 }
 
-export function createApiChat({ provider, semaphore, expectedToken, knowledgePath, log }) {
+export function createApiChat({ provider, semaphore, expectedToken, knowledgePath, chatApiToken = '', log }) {
   return async function handle(req, res, body) {
     const auth = req.headers['authorization'] || ''
     const token = auth.replace(/^Bearer\s+/i, '').trim()
@@ -73,10 +75,11 @@ export function createApiChat({ provider, semaphore, expectedToken, knowledgePat
 
     const siteConfig = site ? getSiteConfig(site) : null
     const siteUrl = payload.siteUrl || ''
-    const [knowledge, snapshot] = await Promise.all([
+    const [fileKnowledge, snapshot] = await Promise.all([
       loadKnowledge(knowledgePath, site),
       siteConfig ? getSnapshot(site, siteConfig).catch(() => null) : Promise.resolve(null),
     ])
+    const knowledge = snapshot?.cmsKnowledge || fileKnowledge
     const snapshotMarkdown = snapshot ? formatSnapshotForPrompt(snapshot, { siteUrl, urlPatterns: siteConfig?.urlPatterns }) : ''
     const prompt = buildPrompt(messages, knowledge, snapshotMarkdown)
 
@@ -86,6 +89,16 @@ export function createApiChat({ provider, semaphore, expectedToken, knowledgePat
       if (snapshot && siteUrl && siteConfig?.urlPatterns) {
         cleanReply = validateUrls(reply, snapshot, { siteUrl, urlPatterns: siteConfig.urlPatterns }).reply
       }
+      if (chatApiToken && (siteConfig?.siteUrl || siteUrl)) {
+        const { reply: looked } = await processLookups(cleanReply, {
+          siteConfig: { ...siteConfig, siteUrl: siteConfig?.siteUrl || siteUrl },
+          token: chatApiToken,
+          locale: siteConfig?.locale || 'et',
+          log,
+        })
+        cleanReply = looked
+      }
+      cleanReply = sanitizeReply(cleanReply, { allowlist: siteConfig?.contactInfo, snapshot }).reply
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ reply: cleanReply, provider: providerUsed }))
       log?.(`[api-chat] site=${site || '-'} provider=${providerUsed} reply=${cleanReply.length}c`)

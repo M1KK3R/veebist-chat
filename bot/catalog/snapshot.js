@@ -5,7 +5,7 @@
  */
 
 import { fetchRegions, fetchProducts } from './medusa.js'
-import { fetchArticles, fetchPages } from './payload.js'
+import { fetchArticles, fetchPages, fetchCmsKnowledge } from './payload.js'
 
 // Live shipping options are intentionally NOT fetched: Medusa v2's
 // /store/shipping-options endpoint requires a cart_id, which we don't have
@@ -34,7 +34,7 @@ async function build(siteConfig) {
     }
   }
 
-  const [products, articles, pages] = await Promise.all([
+  const [products, articles, pages, cmsKnowledge] = await Promise.all([
     hasMedusa
       ? fetchProducts(siteConfig, regionId).catch(err => { log('products fetch failed:', err.message); return [] })
       : Promise.resolve([]),
@@ -44,9 +44,12 @@ async function build(siteConfig) {
     hasPayload
       ? fetchPages(siteConfig).catch(err => { log('pages fetch failed:', err.message); return [] })
       : Promise.resolve([]),
+    hasPayload
+      ? fetchCmsKnowledge(siteConfig).catch(err => { log('cms knowledge fetch failed:', err.message); return '' })
+      : Promise.resolve(''),
   ])
 
-  log(`built: ${products.length} products, ${articles.length} articles, ${pages.length} pages`)
+  log(`built: ${products.length} products, ${articles.length} articles, ${pages.length} pages, cmsKnowledge=${cmsKnowledge ? cmsKnowledge.length + 'c' : 'none'}`)
 
   return {
     builtAt: Date.now(),
@@ -54,6 +57,7 @@ async function build(siteConfig) {
     shippingOptions: [],  // not live; see knowledge file
     articles,
     pages,
+    cmsKnowledge,
     contactInfo: siteConfig.contactInfo,
   }
 }

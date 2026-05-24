@@ -58,3 +58,34 @@ export async function fetchPages(siteConfig) {
     return []
   }
 }
+
+/**
+ * Fetch the per-site curated knowledge base from the @veebist/chat-knowledge
+ * route handler. The Payload API base URL is /api — we strip that to derive
+ * the parent origin where the chat route lives.
+ *
+ * Returns markdown (already aggregated server-side) or empty string on failure.
+ * Empty string signals the caller to use the local knowledge/<site>.md fallback.
+ */
+export async function fetchCmsKnowledge(siteConfig) {
+  if (!siteConfig?.payload?.url) return ''
+  // Payload URLs are typically `https://site/api`. Knowledge lives at
+  // `https://site/api/chat/knowledge`. Strip nothing — Payload's own custom
+  // routes are siblings of its collection routes (Next route handlers).
+  const base = siteConfig.payload.url.replace(/\/$/, '')
+  const url = `${base}/chat/knowledge?lang=${encodeURIComponent(siteConfig.locale || 'et')}`
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
+  try {
+    const res = await fetch(url, { signal: ctrl.signal })
+    if (!res.ok) return ''
+    const ct = res.headers.get('content-type') || ''
+    if (!ct.includes('text/markdown') && !ct.includes('text/plain')) return ''
+    const body = await res.text()
+    return body.trim()
+  } catch {
+    return ''
+  } finally {
+    clearTimeout(timer)
+  }
+}

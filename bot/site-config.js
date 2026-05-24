@@ -54,6 +54,19 @@ export function getSiteConfig(siteKey) {
       article: process.env[`${upper}_URL_PATTERN_ARTICLE`] || '/blogi/{slug}',
       page: process.env[`${upper}_URL_PATTERN_PAGE`] || '/lehed/{slug}',
     },
+    // Public origin used by the bot to call the per-site Next.js route handlers
+    // (`/api/chat/lookup-order` etc.). Defaults to the Chatwoot inbox's
+    // website_url; this env var is the canonical override.
+    siteUrl: process.env[`${upper}_SITE_URL`] || null,
+    // Per-site feature flags. Off by default; opt-in via env.
+    //   <SITE>_FEATURE_GIFTCARD_VALIDATION=true  → bot can emit [[VALIDATE_GIFTCARD]]
+    //   <SITE>_FEATURE_ORDER_LOOKUP=true         → bot can emit [[LOOKUP_ORDER]] / [[LOOKUP_REFUND]]
+    //   <SITE>_KNOWLEDGE_STRATEGY=snapshot|retriever|auto  (default auto, see catalog/retriever.js)
+    featureFlags: {
+      giftcardValidation: process.env[`${upper}_FEATURE_GIFTCARD_VALIDATION`] === 'true',
+      orderLookup: process.env[`${upper}_FEATURE_ORDER_LOOKUP`] === 'true',
+    },
+    knowledgeStrategy: process.env[`${upper}_KNOWLEDGE_STRATEGY`] || 'auto',
   }
 }
 

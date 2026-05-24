@@ -15,6 +15,25 @@ chat-bot.veebist.cloud
   └─ GET  /health                   ← provider state + semaphore depth + endpoint flags
 ```
 
+## Pipeline (v3)
+
+Each visitor message goes through:
+
+```
+Visitor message
+  → handoff trigger?     ─ yes ─→ assign human, stop
+  → rate limit?          ─ blocked ─→ apology + stop
+  → site config + snapshot (live Medusa + Payload + CMS knowledge)
+  → strategy = selectStrategy(snapshot)   (snapshot | retriever | overflow)
+      └─ retriever: pass-1 Claude (router) picks 10 relevant handles
+  → buildSystemPrompt(knowledge, snapshot subset, feature flags)
+  → provider.ask()       (Claude → Codex on failure)
+  → URL validator        (fix Claude's slug-modification bug)
+  → tool dispatcher      (handle [[LOOKUP_ORDER]], [[LOOKUP_REFUND]], [[VALIDATE_GIFTCARD]])
+  → sanitizer            (strip Luhn-valid CCs, IBANs, JWTs, off-allowlist emails/phones)
+  → Chatwoot.postMessage
+```
+
 ## LLM providers — primary/secondary failover
 
 ```
@@ -58,12 +77,23 @@ bot/
 ├── lib/
 │   ├── semaphore.js             Async semaphore for concurrency control
 │   ├── chatwoot.js              Chatwoot API client (postMessage, fetchHistory, ...)
-│   └── alerts.js                AlertSink (log + SMTP + Chatwoot inbox)
+│   ├── alerts.js                AlertSink (log + SMTP + Chatwoot inbox)
+│   ├── rate-limit.js            Per-visitor token-bucket rate limiter
+│   ├── url-validator.js         Post-processor: re-anchors LLM-mutated slugs to catalog truth
+│   ├── tools.js                 Verified-lookup tool dispatcher (LOOKUP_ORDER/REFUND, VALIDATE_GIFTCARD)
+│   └── sanitize.js              Final-pass scrub: Luhn-CC, IBAN, JWT, bearer, off-allowlist email/phone
+├── catalog/
+│   ├── medusa.js                Live products + regions
+│   ├── payload.js               Articles + pages + curated CMS knowledge (from @veebist/chat-knowledge)
+│   ├── snapshot.js              10-min stale-while-revalidate per-site cache
+│   ├── format.js                Snapshot → compact markdown for system prompt
+│   └── retriever.js             LLM-as-retriever: 2-pass strategy for 201-5000 item catalogs
 ├── api/
 │   ├── openai-shim.js           OpenAI-compatible /v1/chat/completions handler
 │   └── chat.js                  Generic /api/chat handler (bearer auth)
+├── tests/                       node:test unit tests (npm test)
 └── knowledge/
-    └── <site>.md                Per-site FAQ — loaded into system prompt, 5-min cache
+    └── <site>.md                Fallback per-site FAQ — used when Payload CMS knowledge is empty
 ```
 
 ## Configuration (env)
@@ -94,7 +124,87 @@ CHATWOOT_OPENAI_KEY=<random 32-byte hex>
 
 # Generic /api/chat endpoint (for external Veebist tools)
 CHAT_BOT_API_TOKEN=<random 32-byte hex>
+
+# Verified-lookup routes on each site (shared with @veebist/chat-api on site host)
+CHAT_API_TOKEN=<random 32-byte hex>
+
+# Per-site (replace `SCOTTEST` with the site key)
+SCOTTEST_MEDUSA_URL=https://api.scottest.veebist.cloud
+SCOTTEST_MEDUSA_PUBLISHABLE_KEY=pk_…
+SCOTTEST_PAYLOAD_URL=https://scottest.veebist.cloud/api
+SCOTTEST_LOCALE=et
+SCOTTEST_DISPLAY_NAME="ScotEst OÜ"
+SCOTTEST_PRODUCT_LIMIT=100
+SCOTTEST_CONTACT_EMAIL=info@scottest.ee
+SCOTTEST_CONTACT_PHONE=+372…
+SCOTTEST_SITE_URL=https://scottest.veebist.cloud      # used to call /api/chat/lookup-*
+SCOTTEST_FEATURE_ORDER_LOOKUP=true                     # enable [[LOOKUP_ORDER/REFUND]] markers
+SCOTTEST_FEATURE_GIFTCARD_VALIDATION=false             # opt-in; default off
+SCOTTEST_KNOWLEDGE_STRATEGY=auto                       # auto | snapshot | retriever
 ```
+
+## Verified-lookup tools
+
+When `SCOTTEST_FEATURE_ORDER_LOOKUP=true` (or the matching `<SITE>_…` env),
+the system prompt teaches the LLM to emit one of these on its own line:
+
+```
+[[LOOKUP_ORDER email=info@scottest.ee display_id=1234]]
+[[LOOKUP_REFUND email=info@scottest.ee display_id=1234]]
+[[VALIDATE_GIFTCARD code=ABCD-1234]]
+```
+
+`lib/tools.js` scans the reply for those, calls the matching route on the
+site's origin (`POST <SITE_URL>/api/chat/{lookup-order,lookup-refund,validate-giftcard}`,
+bearer = `CHAT_API_TOKEN`), and substitutes a localized natural-language
+result. Each marker is matched against the actual server-side data — the
+visitor's claimed email + order# must both match, otherwise the bot says
+"I couldn't find that order" with no info leak.
+
+The site-side routes are provided by [`@veebist/chat-api`](https://github.com/M1KK3R/veebist-platform/tree/main/packages/chat-api).
+
+## CMS-curated knowledge
+
+If the site has [`@veebist/chat-knowledge`](https://github.com/M1KK3R/veebist-platform/tree/main/packages/chat-knowledge)
+mounted at `/api/chat/knowledge`, the bot polls it on every snapshot
+refresh and prefers its content over the local `knowledge/<site>.md`
+fallback. The CMS lets clients update their KB through the Payload admin
+UI — no SSH, no editing markdown on the bot host.
+
+## LLM-as-retriever (Phase 2 catalog mode)
+
+For catalogs > 200 products, `catalog/retriever.js` runs a two-pass
+prompt: pass-1 router picks the ≤10 most relevant product handles from a
+compact (handle | title | desc) catalog; pass-2 answerer composes the
+reply with full details for just those picks. No embeddings, no extra
+service — both passes go through the existing Claude/Codex providers.
+
+The strategy is auto-selected by catalog size; override per-site with
+`<SITE>_KNOWLEDGE_STRATEGY=snapshot|retriever|auto`.
+
+## Output sanitization
+
+Final-pass scrub runs on every reply (webhook + `/api/chat`) regardless of
+whether tools fired. `lib/sanitize.js` strips:
+
+- Luhn-valid credit card numbers (raw or space/dash-grouped)
+- IBAN-shaped strings
+- JWTs (`eyJ…`) + Bearer/api-key fragments ≥24 chars
+- Email addresses NOT in `siteConfig.contactInfo` or the snapshot
+- International phone numbers NOT in the allowlist
+
+Stripped values are replaced with `…` so the surrounding sentence still
+reads naturally. The set of fired patterns is logged but never the values.
+
+## Tests
+
+```bash
+cd bot && npm test
+```
+
+42 tests covering: sanitizer (Luhn + allowlist), tool dispatcher (all 3
+markers + EN/ET rendering + network failure), retriever strategy
+selection + router parsing, and CMS knowledge fetch.
 
 ## Adding chat to a new client site
 
