@@ -194,7 +194,12 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  if (req.method === 'POST' && req.url === '/v1/chat/completions') {
+  if (req.method === 'POST' && (req.url === '/v1/chat/completions' || req.url === '/chat/completions')) {
+    // Chatwoot's Llm::Config.configure_ruby_llm chomps the endpoint and lets
+    // RubyLLM append /chat/completions (no /v1), while Captain's
+    // BaseTaskService#api_base appends "/v1" then RubyLLM tacks on
+    // /chat/completions. We serve both URL shapes so the same endpoint env
+    // works for both code paths.
     const body = await readBody(req)
     return openaiShim(req, res, body)
   }
