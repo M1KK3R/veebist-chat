@@ -13,18 +13,15 @@
 #   4. Disable account signup in the admin → System → Settings to lock it down
 
 x-base: &base
-  image: chatwoot/chatwoot:v3.16.0
+  image: chatwoot/chatwoot:v4.14.0
   env_file: .env
   restart: always
   volumes:
     - storage:/app/storage
-    # Chatwoot v3.16.0 hardcodes `https://api.openai.com/v1/chat/completions`
-    # as a frozen constant in OpenaiBaseService. We override the file via
-    # bind-mount so it points at our local OpenAI-compatible shim
-    # (chat-bot.veebist.cloud/v1) which routes to Claude/Codex via failover.
-    # Remove this override when upgrading to a Chatwoot release that supports
-    # env-configurable OPENAI_API_BASE_URL.
-    - ./overrides/openai_base_service.rb:/app/lib/integrations/openai_base_service.rb:ro
+    # v3.16 had a frozen `https://api.openai.com/v1/chat/completions` constant
+    # and we used to bind-mount overrides/openai_base_service.rb to redirect it.
+    # v4 introduced Captain + the InstallationConfig `CAPTAIN_OPEN_AI_ENDPOINT`,
+    # which is what reroutes calls to our shim instead — no file patch needed.
   networks:
     - chatwoot
     - traefik-public
