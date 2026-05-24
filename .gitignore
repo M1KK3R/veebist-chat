@@ -1,0 +1,4 @@
+.env
+*.dump
+chatwoot-pre-*.dump
+node_modules/
