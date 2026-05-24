@@ -1,240 +1,183 @@
-# chat-bot — Chatwoot ↔ Claude CLI bridge
+# chat-bot — Chatwoot ↔ Claude/Codex bridge
 
-A ~200-line Node service that turns a Chatwoot Agent Bot webhook into AI
-responses powered by the host operator's Claude Code CLI subscription.
+A small Node service that powers Chatwoot's visitor chat **and** agent-side
+AI features via the operator's Claude / Codex CLI subscriptions. No
+per-token OpenAI billing.
 
-## Why CLI, not API?
-
-Two patterns work:
-
-1. **Anthropic API** — Use `@anthropic-ai/sdk`, set `ANTHROPIC_API_KEY` in env.
-   Pros: stateless, no auth refresh issues. Cons: per-token billing on
-   top of any existing Claude subscription.
-2. **Claude CLI mounted from host** — Bind-mount the host's `~/.local/bin/claude`
-   binary + `~/.claude{,.json}` auth state into the container; shell out to
-   `claude -p "<prompt>"`. Uses your existing Claude Pro/Max subscription.
-   No per-token billing, no API key to manage. This is the
-   [kusimusi pattern](https://github.com/M1KK3R/kusimusi) — works for any
-   container that runs as the same UID as the host user (1001 on this VPS).
-
-This bot uses **option 2** because Veebist already pays for Claude
-subscriptions per developer, and the message volume is well under what
-a single Pro plan supports.
-
-To swap to the API instead: replace `askClaude()` in `index.js` with an
-`@anthropic-ai/sdk` call. ~10 line diff.
-
-## Architecture
+## Three endpoints, one service
 
 ```
-                          Chatwoot Rails
-                                │
-                                │  AgentBots::WebhookJob (Sidekiq)
-                                │  POST https://chat-bot.../webhook
-                                │  Body: { event:'message_created', conversation, content, ... }
-                                ▼
-                       ┌──────────────────┐
-                       │  chat-bot        │
-                       │  index.js        │
-                       │  (Node 20 http)  │
-                       └────┬─────────────┘
-                            │
-                  ┌─────────┼─────────────┐
-                  ▼         ▼             ▼
-            handoff?    fetch         knowledge.md
-            (keywords) history       (5-min cache)
-                  │     (last 6)         │
-                  │         │            │
-                  └─────────┴────────────┘
-                            │
-                            ▼
-                  ┌──────────────────┐
-                  │  claude -p ...   │
-                  │  --output-format │
-                  │  json            │
-                  └──────┬───────────┘
-                         │  result.text
-                         ▼
-                  POST /api/v1/accounts/<id>/
-                       conversations/<id>/messages
-                  → reply appears in widget
+chat-bot.veebist.cloud
+  ├─ POST /webhook                  ← Chatwoot Agent Bot webhook (visitor chat)
+  ├─ POST /v1/chat/completions      ← OpenAI-compatible shim (Captain dashboard AI)
+  ├─ POST /chat/completions         ← same handler (Chatwoot v4 calls both URL shapes)
+  ├─ POST /api/chat                 ← generic bearer-authed endpoint for external tools
+  └─ GET  /health                   ← provider state + semaphore depth + endpoint flags
 ```
+
+## LLM providers — primary/secondary failover
+
+```
+┌─────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│ HTTP request    │ →  │ Semaphore (cap 6)│ →  │ FailoverProvider │
+│ (any endpoint)  │    │ throttles all    │    │  primary: Claude │
+│                 │    │ LLM calls        │    │  fallback: Codex │
+└─────────────────┘    └──────────────────┘    └────────┬─────────┘
+                                                         │
+                                              ┌──────────┴──────────┐
+                                              ▼                     ▼
+                                       Claude CLI            Codex CLI
+                                       (subscription)        (subscription)
+```
+
+Per-provider state is tracked (`healthy` / `degraded` / `down`). A 5-min
+background probe re-promotes recovered providers. Auth-class failures
+mark a provider `down` immediately; everything else marks `degraded`.
+
+When the primary flips to unhealthy, alerts go to:
+
+1. structured log line
+2. SMTP email (`tarmo@veebist.ee`)
+3. "Bot Alerts" Chatwoot inbox conversation (visible in the mobile app)
+
+Debounced to one alert per provider per hour.
 
 ## File layout
 
 ```
 bot/
-├── Dockerfile          node:20-bookworm-slim, app user UID 1001
-├── index.js            entrypoint: HTTP server, webhook handler, Claude shell-out, Chatwoot client
+├── Dockerfile                   node:20-bookworm-slim, ca-certificates, UID 1001
+├── package.json                 dep: nodemailer (for failover alert emails)
+├── index.js                     HTTP server, webhook handler, knowledge cache
+├── providers/
+│   ├── base.js                  ProviderError + error classification
+│   ├── claude.js                ClaudeProvider (shells out to `claude -p ... --output-format json`)
+│   ├── codex.js                 CodexProvider (shells out to `codex exec ...`)
+│   ├── failover.js              FailoverProvider — primary/secondary + health tracking
+│   └── index.js                 buildProvider() factory
+├── lib/
+│   ├── semaphore.js             Async semaphore for concurrency control
+│   ├── chatwoot.js              Chatwoot API client (postMessage, fetchHistory, ...)
+│   └── alerts.js                AlertSink (log + SMTP + Chatwoot inbox)
+├── api/
+│   ├── openai-shim.js           OpenAI-compatible /v1/chat/completions handler
+│   └── chat.js                  Generic /api/chat handler (bearer auth)
 └── knowledge/
-    └── <site>.md       markdown FAQ + business info, loaded into the system prompt
+    └── <site>.md                Per-site FAQ — loaded into system prompt, 5-min cache
 ```
 
-## index.js — the parts that matter
-
-```js
-// 1. Webhook arrives. Filter to incoming visitor messages.
-async function handleWebhook(event) {
-  if (event.event !== 'message_created') return
-  if (event.message_type !== 'incoming') return
-  if (event.private) return
-  // Skip if conversation already in human queue.
-  if (event.conversation?.status === 'open') return
-  ...
-```
-
-```js
-// 2. Handoff detection. Visitor asks for human → bot bows out.
-const HANDOFF_TRIGGERS = [
-  'human', 'agent', 'real person', 'speak to someone',
-  'inimene', 'inimesega', 'klienditugi', 'töötaja',
-]
-
-if (HANDOFF_TRIGGERS.some(t => content.toLowerCase().includes(t))) {
-  await postMessage(conversationId, '... transitioning message ...')
-  await toggleStatus(conversationId, 'open')
-  return
-}
-```
-
-```js
-// 3. Build prompt: system + knowledge + transcript + new message.
-const prompt = `${systemPrompt}
-
-# Conversation so far
-${history.map(m => `${m.role}: ${m.content}`).join('\n')}
-
-Visitor (latest): ${content}
-
-Your reply:`
-
-// 4. Shell out to Claude CLI. 60-second timeout.
-const reply = await askClaude(prompt)
-
-// 5. Post back as the AgentBot user.
-await postMessage(conversationId, reply)
-```
-
-## Per-site knowledge
-
-Each website inbox gets its own knowledge file. Currently:
-
-- `knowledge/scottest.md` — ScottEst OÜ (Scottish tartan products, Estonia)
-
-Add a new tenant:
-
-1. Drop `knowledge/<slug>.md` with sections like:
-   - Üldine info / General info
-   - Teenused / Services
-   - Tarne / Shipping
-   - Maksmine / Payment
-   - Kinkekaardid / Gift cards
-   - Tagastus ja vahetus
-   - Mida ma ei tea / What I cannot answer
-2. Update `detectSite()` in `index.js` to map the inbox name → slug
-3. `docker compose restart chat-bot` (or wait 5 min for cache eviction)
-
-## Why the Dockerfile uses bookworm not alpine
-
-The Claude CLI is a 236MB ELF binary statically linked against **glibc**.
-Alpine uses **musl libc**. Running the glibc binary on musl fails with a
-cryptic `claude: not found` even though `which claude` finds the file.
-
-Solution: use a glibc base. `node:20-bookworm-slim` is the smallest
-practical choice — ~70MB compressed.
-
-## Why UID 1001
-
-The host's `~/.local/share/claude/versions/2.1.146` (the actual binary)
-and `~/.claude/.credentials.json` are mode 600/700 owned by `claudeuser`
-(UID 1001). For the container to read them via bind mount, the container
-process must run as the same UID.
-
-```dockerfile
-RUN groupadd -g 1001 app \
-    && useradd -u 1001 -g 1001 -m -s /bin/bash app
-USER app
-```
-
-## Why the bot talks to Chatwoot via the public URL
-
-Inside the Docker network the bot could reach Rails at `http://rails:3000`.
-But Chatwoot ships with `FORCE_SSL=true` (which we override to `false` —
-see main README), and the SSL story across Docker network + Node fetch +
-Rails middleware is fragile. The bot uses the public `https://chat.veebist.cloud`
-URL instead — it's a fast loopback through Traefik and cleanly TLS-terminated.
-
-```js
-const CHATWOOT_URL = process.env.CHATWOOT_URL || 'http://rails:3000'
-```
-
-Env override in `docker-compose.yml`:
-```yaml
-CHATWOOT_URL: https://chat.veebist.cloud
-```
-
-## Handoff: what it does, what it doesn't
-
-When the visitor types a handoff keyword (`human`, `inimene`, etc.), the
-bot does **two** things:
-
-1. Posts a transitioning message — bilingual ET/EN
-2. Calls `POST /conversations/<id>/toggle_status` to flip from `pending` → `open`
-
-What it doesn't do:
-- **Doesn't auto-assign** to a specific agent. Chatwoot's
-  auto-assignment-on-inbox config handles that.
-- **Doesn't notify agents directly**. Chatwoot's notification subscriptions
-  fire when conversation status changes, *if* the agent is an inbox member
-  and has notifications enabled.
-
-## Debugging
+## Configuration (env)
 
 ```bash
-# Tail bot logs
-docker logs -f chat-bot
+# core
+CHATWOOT_URL=https://chat.veebist.cloud
+CHATWOOT_API_TOKEN=<bot agent token>
+CHATWOOT_ACCOUNT_ID=2
 
-# Tail Chatwoot's view of webhook delivery
-docker logs -f chatwoot-sidekiq | grep AgentBots::WebhookJob
+# providers
+PRIMARY_LLM=claude              # claude | codex | none
+SECONDARY_LLM=codex             # claude | codex | none
+MAX_CONCURRENT=6                # semaphore cap; warns at half
 
-# Test the bot's health endpoint
-curl https://chat-bot.veebist.cloud/health
-# Expect: {"status":"ok","uptime":<seconds>}
+# failover alerts (any can be left blank to disable that channel)
+ALERT_INBOX_ID=3                # dedicated Chatwoot inbox for system alerts
+ALERT_CONTACT_ID=11             # contact id linked to that inbox
+SMTP_HOST=smtp.hostinger.com
+SMTP_PORT=465
+SMTP_USER=info@scottest.ee
+SMTP_PASS=...
+ALERT_EMAIL_FROM=info@scottest.ee
+ALERT_EMAIL_TO=tarmo@veebist.ee
 
-# Test Claude CLI directly inside the container
-docker exec chat-bot sh -c 'echo test | claude -p "Reply OK" --output-format json'
-# 401? Bot needs restart so it sees the refreshed auth file.
+# OpenAI-compatible shim (for Chatwoot's agent-AI Captain features)
+CHATWOOT_OPENAI_KEY=<random 32-byte hex>
 
-# Bot received a webhook but didn't reply?
-# Look for the conv= log line:
-docker logs chat-bot | grep conv=
-# Each visitor message should log:
-#   [bot] conv=N site=X asking…
-#   [bot] conv=N replied (Y chars)
+# Generic /api/chat endpoint (for external Veebist tools)
+CHAT_BOT_API_TOKEN=<random 32-byte hex>
 ```
 
-## Adding API-based alternative
+## Adding chat to a new client site
 
-If you'd rather pay per token than rely on the CLI mount (e.g. for a
-client that doesn't share their Claude account), edit `askClaude()`:
+Two artifacts work together:
 
-```js
-import Anthropic from '@anthropic-ai/sdk'
-const client = new Anthropic()  // uses ANTHROPIC_API_KEY env
+1. **`@veebist/chat-widget`** (in [veebist-platform](https://github.com/M1KK3R/veebist-platform)) — the React widget the site embeds
+2. **This service** — shared infrastructure on the VPS, serves all sites via Chatwoot inboxes
 
-async function askClaude(prompt) {
-  const msg = await client.messages.create({
-    model: 'claude-sonnet-4-6',  // or whatever's current
-    max_tokens: 1024,
-    messages: [{ role: 'user', content: prompt }],
-  })
-  return msg.content[0].text
-}
+Per-site steps (also automated by `scripts/onboard-site.mjs`):
+
+```bash
+# 1. interactive: creates inbox, assigns bot, collaborator, knowledge template
+node scripts/onboard-site.mjs
+
+# 2. in the new site's package.json
+"@veebist/chat-widget": "file:../../veebist-platform/packages/chat-widget"
+
+# 3. in the new site's root layout
+import { ChatwootWidget } from '@veebist/chat-widget'
+<ChatwootWidget />
+
+# 4. set two env vars on the site's build
+NEXT_PUBLIC_CHATWOOT_BASE_URL=https://chat.veebist.cloud
+NEXT_PUBLIC_CHATWOOT_WEBSITE_TOKEN=<copied from inbox settings>
 ```
 
-Then in `Dockerfile`, drop the Claude bind-mount block. Set
-`ANTHROPIC_API_KEY` in `.env`.
+That's it. Visitor chat works immediately; the bot routes through Claude
+(or Codex on failover). Knowledge is hand-curated at `bot/knowledge/<slug>.md`
+and reloaded every 5 min — no restart needed.
 
-## License
+## Chatwoot v4 + Captain agent AI
 
-MIT.
+Chatwoot v4 moved its agent-side AI features (Suggest reply, Summarize,
+Rephrase, etc.) into a system called **Captain**. We hijack it to use our
+own shim instead of api.openai.com.
+
+Two `InstallationConfig` rows control this (set them once after the v4 upgrade):
+
+| Name | Value |
+|---|---|
+| `CAPTAIN_OPEN_AI_API_KEY` | same value as `CHATWOOT_OPENAI_KEY` (bot env) |
+| `CAPTAIN_OPEN_AI_ENDPOINT` | `https://chat-bot.veebist.cloud/` ← **no /v1** |
+| `CAPTAIN_OPEN_AI_MODEL` | any OpenAI model name (e.g. `gpt-4o-mini`); the shim ignores it |
+
+Why no `/v1` on the endpoint? Chatwoot's `Captain::BaseTaskService#api_base`
+appends `/v1` itself, and the global `Llm::Config.configure_ruby_llm` lets
+RubyLLM append `/chat/completions`. The bot serves **both** `/chat/completions`
+and `/v1/chat/completions` to handle both code paths from a single endpoint.
+
+## Codex CLI gotcha on the VPS
+
+System `/usr/local/bin/codex` was the broken **0.93.0** for ChatGPT-account
+auth (model `gpt-5.5` requires a newer CLI; npm's `@latest` is still 0.93.0).
+Claudeuser's npm prefix has the working **0.132.0** at
+`~/.npm-global/lib/node_modules/@openai/codex/`. We repointed `/usr/local/bin/codex`
+there. If `sudo npm install -g @openai/codex` ever clobbers this:
+
+```bash
+sudo rm /usr/local/bin/codex
+sudo ln -s /home/claudeuser/.npm-global/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex
+```
+
+## Shared types
+
+Sites that integrate the bot beyond the widget (custom server-side calls)
+should depend on [`@veebist/chat-types`](../../../veebist-platform/packages/chat-types)
+for the wire format (webhook payloads, `/api/chat` shapes, `/health` shape).
+
+## Local development
+
+```bash
+# install deps
+cd bot && npm install
+
+# run with mocked providers (export DRY_RUN=1 in your env first, or hardcode for testing)
+node index.js
+```
+
+## Operating
+
+| Command | What |
+|---|---|
+| `docker logs chat-bot --tail 50 -f` | tail bot logs |
+| `curl https://chat-bot.veebist.cloud/health \| jq` | provider state + semaphore depth |
+| `docker compose --env-file .env up -d --force-recreate chat-bot` | redeploy bot only |
+| `docker compose --env-file .env restart chat-bot` | restart bot (picks up new host mounts e.g. fresh Claude credentials.json) |
