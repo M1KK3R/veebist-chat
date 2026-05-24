@@ -18,6 +18,13 @@ x-base: &base
   restart: always
   volumes:
     - storage:/app/storage
+    # Chatwoot v3.16.0 hardcodes `https://api.openai.com/v1/chat/completions`
+    # as a frozen constant in OpenaiBaseService. We override the file via
+    # bind-mount so it points at our local OpenAI-compatible shim
+    # (chat-bot.veebist.cloud/v1) which routes to Claude/Codex via failover.
+    # Remove this override when upgrading to a Chatwoot release that supports
+    # env-configurable OPENAI_API_BASE_URL.
+    - ./overrides/openai_base_service.rb:/app/lib/integrations/openai_base_service.rb:ro
   networks:
     - chatwoot
     - traefik-public
@@ -107,6 +114,26 @@ services:
       CHATWOOT_ACCOUNT_ID: ${BOT_CHATWOOT_ACCOUNT_ID:-1}
       KNOWLEDGE_PATH: /app/knowledge
       PORT: 3500
+      # LLM providers (failover primary → secondary)
+      PRIMARY_LLM: ${PRIMARY_LLM:-claude}
+      SECONDARY_LLM: ${SECONDARY_LLM:-codex}
+      MAX_CONCURRENT: ${MAX_CONCURRENT:-6}
+      # Failover alerting — values left blank disable that channel
+      ALERT_INBOX_ID: ${ALERT_INBOX_ID:-}
+      ALERT_CONTACT_ID: ${ALERT_CONTACT_ID:-}
+      SMTP_HOST: ${ALERT_SMTP_HOST:-}
+      SMTP_PORT: ${ALERT_SMTP_PORT:-465}
+      SMTP_SECURE: ${ALERT_SMTP_SECURE:-true}
+      SMTP_USER: ${ALERT_SMTP_USER:-}
+      SMTP_PASS: ${ALERT_SMTP_PASS:-}
+      ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      # OpenAI-compatible shim: set to a strong random secret. In Chatwoot
+      # admin → Settings → Integrations → OpenAI, paste the same value as
+      # the API key. Empty disables the endpoint.
+      CHATWOOT_OPENAI_KEY: ${CHATWOOT_OPENAI_KEY:-}
+      # Generic /api/chat bearer for external Veebist tools.
+      CHAT_BOT_API_TOKEN: ${CHAT_BOT_API_TOKEN:-}
     volumes:
       # Knowledge per site (markdown files named <inbox-slug>.md)
       - ./bot/knowledge:/app/knowledge:ro
@@ -117,6 +144,10 @@ services:
       - /home/claudeuser/.local/share/claude:/home/app/.local/share/claude:ro
       - /home/claudeuser/.claude:/home/app/.claude:ro
       - /home/claudeuser/.claude.json:/home/app/.claude.json:ro
+      # Codex CLI (v0.132.0 ChatGPT-auth; lives in claudeuser's npm prefix,
+      # NOT /usr/local — see memory chatwoot-stack.md for the symlink fix).
+      - /home/claudeuser/.npm-global/lib/node_modules/@openai/codex:/opt/codex:ro
+      - /home/claudeuser/.codex:/home/app/.codex:rw
     depends_on:
       - rails
     networks:
