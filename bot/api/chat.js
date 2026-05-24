@@ -9,6 +9,9 @@
  */
 
 import fs from 'node:fs/promises'
+import { getSiteConfig } from '../site-config.js'
+import { getSnapshot } from '../catalog/snapshot.js'
+import { formatSnapshotForPrompt } from '../catalog/format.js'
 
 const knowledgeCache = new Map()
 const KNOWLEDGE_TTL_MS = 5 * 60_000
@@ -26,11 +29,10 @@ async function loadKnowledge(knowledgePath, site) {
   }
 }
 
-function buildPrompt(messages, knowledge) {
+function buildPrompt(messages, knowledge, snapshotMarkdown) {
   const lines = []
-  if (knowledge) {
-    lines.push('# Knowledge base', knowledge, '')
-  }
+  if (knowledge) lines.push('# Knowledge base', knowledge, '')
+  if (snapshotMarkdown) lines.push(snapshotMarkdown, '')
   for (const m of messages) {
     if (!m || typeof m.content !== 'string') continue
     const role = m.role === 'system' ? 'System'
@@ -68,8 +70,13 @@ export function createApiChat({ provider, semaphore, expectedToken, knowledgePat
       return
     }
 
-    const knowledge = await loadKnowledge(knowledgePath, site)
-    const prompt = buildPrompt(messages, knowledge)
+    const siteConfig = site ? getSiteConfig(site) : null
+    const [knowledge, snapshot] = await Promise.all([
+      loadKnowledge(knowledgePath, site),
+      siteConfig ? getSnapshot(site, siteConfig).catch(() => null) : Promise.resolve(null),
+    ])
+    const snapshotMarkdown = snapshot ? formatSnapshotForPrompt(snapshot, { siteUrl: '' }) : ''
+    const prompt = buildPrompt(messages, knowledge, snapshotMarkdown)
 
     try {
       const { reply, providerUsed } = await semaphore.run(() => provider.ask(prompt))

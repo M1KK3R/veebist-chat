@@ -131,6 +131,15 @@ services:
       CHATWOOT_OPENAI_KEY: ${CHATWOOT_OPENAI_KEY:-}
       # Generic /api/chat bearer for external Veebist tools.
       CHAT_BOT_API_TOKEN: ${CHAT_BOT_API_TOKEN:-}
+      # Phase 1 live catalog (Medusa + Payload) — per-site keys below.
+      # Add more blocks when onboarding new sites.
+      SCOTTEST_MEDUSA_URL: ${SCOTTEST_MEDUSA_URL:-}
+      SCOTTEST_MEDUSA_PUBLISHABLE_KEY: ${SCOTTEST_MEDUSA_PUBLISHABLE_KEY:-}
+      SCOTTEST_PAYLOAD_URL: ${SCOTTEST_PAYLOAD_URL:-}
+      SCOTTEST_PAYLOAD_TOKEN: ${SCOTTEST_PAYLOAD_TOKEN:-}
+      SCOTTEST_PRODUCT_LIMIT: ${SCOTTEST_PRODUCT_LIMIT:-}
+      SCOTTEST_ARTICLE_LIMIT: ${SCOTTEST_ARTICLE_LIMIT:-}
+      SCOTTEST_MEDUSA_REGION_ID: ${SCOTTEST_MEDUSA_REGION_ID:-}
     volumes:
       # Knowledge per site (markdown files named <inbox-slug>.md)
       - ./bot/knowledge:/app/knowledge:ro
