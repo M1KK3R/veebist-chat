@@ -54,10 +54,20 @@ function normalizeProduct(p) {
   })
   const prices = variants.map(v => v.price).filter(p => typeof p === 'number')
   const anyInStock = variants.some(v => v.inStock === true)
+  // Per-site convention (see scottest-site/site/src/lib/i18n-product.ts):
+  // Medusa stores one canonical product, EN translations live in
+  // metadata.title_en / metadata.description_en. Passing the EN fields
+  // through lets the formatter present both languages to the LLM so the
+  // bot can answer correctly regardless of the visitor's language.
+  const md = p.metadata || {}
+  const titleEn = typeof md.title_en === 'string' ? md.title_en.trim() : ''
+  const descriptionEn = typeof md.description_en === 'string' ? md.description_en.trim() : ''
   return {
     title: p.title,
+    titleEn: titleEn || null,
     handle: p.handle,
     description: (p.description || '').slice(0, 240),
+    descriptionEn: descriptionEn ? descriptionEn.slice(0, 240) : null,
     categories: (p.categories || []).map(c => c.name),
     minPrice: prices.length ? Math.min(...prices) : null,
     maxPrice: prices.length ? Math.max(...prices) : null,

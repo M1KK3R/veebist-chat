@@ -26,9 +26,12 @@ function productLine(p, baseUrl, pattern) {
   const url = (baseUrl && pattern) ? `${baseUrl}${applyPattern(pattern, p.handle)}` : ''
   // Render the product name as a markdown link when we have a URL. Chatwoot's
   // widget renders markdown — the visitor sees a clickable product name
-  // instead of a name + a raw URL.
-  const head = url ? `[${p.title}](${url})` : p.title
-  return `- ${head} ${price}${cats}${stock}`
+  // instead of a name + a raw URL. When an EN title is available, list it
+  // alongside the canonical (Estonian) title so the LLM can answer the
+  // visitor in whichever language they wrote in.
+  const headEt = url ? `[${p.title}](${url})` : p.title
+  const headEn = p.titleEn && p.titleEn !== p.title ? ` / ${p.titleEn}` : ''
+  return `- ${headEt}${headEn} ${price}${cats}${stock}`
 }
 
 function articleLine(a, baseUrl, pattern) {
