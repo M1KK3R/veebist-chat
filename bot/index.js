@@ -188,7 +188,11 @@ async function handleWebhook(event) {
 
   const site = detectSite(event)
   const siteConfig = getSiteConfig(site)
-  const siteUrl = event?.conversation?.meta?.inbox?.website_url || ''
+  // Prefer env-configured siteUrl (canonical) over the webhook payload's
+  // inbox.website_url — Chatwoot doesn't always include website_url in the
+  // message_created webhook, which previously left the snapshot rendered
+  // without product URLs and made Claude say "the catalog has no URLs".
+  const siteUrl = siteConfig?.siteUrl || event?.conversation?.meta?.inbox?.website_url || ''
 
   const [fileKnowledge, history, snapshot] = await Promise.all([
     loadKnowledge(site),

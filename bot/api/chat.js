@@ -74,7 +74,7 @@ export function createApiChat({ provider, semaphore, expectedToken, knowledgePat
     }
 
     const siteConfig = site ? getSiteConfig(site) : null
-    const siteUrl = payload.siteUrl || ''
+    const siteUrl = payload.siteUrl || siteConfig?.siteUrl || ''
     const [fileKnowledge, snapshot] = await Promise.all([
       loadKnowledge(knowledgePath, site),
       siteConfig ? getSnapshot(site, siteConfig).catch(() => null) : Promise.resolve(null),

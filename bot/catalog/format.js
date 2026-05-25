@@ -23,15 +23,20 @@ function productLine(p, baseUrl, pattern) {
     : `${fmtPrice(p.minPrice, p.currency)}–${fmtPrice(p.maxPrice, p.currency)}`
   const cats = p.categories.length ? ` [${p.categories.join(', ')}]` : ''
   const stock = p.inStock ? '' : ' (otsas)'
-  const url = (baseUrl && pattern) ? ` — ${baseUrl}${applyPattern(pattern, p.handle)}` : ''
-  return `- ${p.title} ${price}${cats}${stock}${url}`
+  const url = (baseUrl && pattern) ? `${baseUrl}${applyPattern(pattern, p.handle)}` : ''
+  // Render the product name as a markdown link when we have a URL. Chatwoot's
+  // widget renders markdown — the visitor sees a clickable product name
+  // instead of a name + a raw URL.
+  const head = url ? `[${p.title}](${url})` : p.title
+  return `- ${head} ${price}${cats}${stock}`
 }
 
 function articleLine(a, baseUrl, pattern) {
   const date = a.publishedAt ? new Date(a.publishedAt).toISOString().slice(0, 10) : ''
-  const url = (baseUrl && pattern) ? ` — ${baseUrl}${applyPattern(pattern, a.slug)}` : ''
+  const url = (baseUrl && pattern) ? `${baseUrl}${applyPattern(pattern, a.slug)}` : ''
+  const head = url ? `[${a.title}](${url})` : a.title
   const excerpt = a.excerpt ? `  ${a.excerpt}` : ''
-  return `- ${a.title}${date ? ` (${date})` : ''}${url}${excerpt ? '\n  ' + excerpt : ''}`
+  return `- ${head}${date ? ` (${date})` : ''}${excerpt ? '\n  ' + excerpt : ''}`
 }
 
 function shippingLine(s) {
@@ -66,8 +71,9 @@ export function formatSnapshotForPrompt(snapshot, { siteUrl = '', urlPatterns = 
   if (snapshot.pages?.length) {
     lines.push('## Lehed (pages)')
     for (const p of snapshot.pages) {
-      const url = (siteUrl && urlPatterns.page) ? ` — ${siteUrl}${applyPattern(urlPatterns.page, p.slug)}` : ''
-      lines.push(`- ${p.title}${url}`)
+      const url = (siteUrl && urlPatterns.page) ? `${siteUrl}${applyPattern(urlPatterns.page, p.slug)}` : ''
+      const head = url ? `[${p.title}](${url})` : p.title
+      lines.push(`- ${head}`)
     }
     lines.push('')
   }
