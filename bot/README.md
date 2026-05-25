@@ -163,6 +163,26 @@ visitor's claimed email + order# must both match, otherwise the bot says
 
 The site-side routes are provided by [`@veebist/chat-api`](https://github.com/M1KK3R/veebist-platform/tree/main/packages/chat-api).
 
+## Product links in replies
+
+`catalog/format.js` renders each product as a markdown link in the system
+prompt: `- [Title](https://site/pood/handle) €price [cats]`. Claude
+copies these verbatim, so the visitor sees the **product name as a
+clickable link**, not a separate bare URL. Articles + pages use the same
+format.
+
+For this to work, `<SITE>_SITE_URL` must be set on the bot host. The
+webhook payload's `inbox.website_url` is unreliable (Chatwoot doesn't
+always include it on `message_created`), so the env var is the canonical
+source. Without it, products render without URLs and Claude correctly
+says "the catalog has no URLs" rather than inventing them.
+
+After all that, `lib/url-validator.js` runs as a safety net — if Claude
+*does* mutate a URL (underscore↔hyphen swap, slug translation, etc.) it
+fuzzy-matches against the snapshot and rewrites to canonical, or strips
+the URL entirely if no match. Logs `URLs corrected=… removed=… ok=…`
+when fixes fire.
+
 ## CMS-curated knowledge
 
 If the site has [`@veebist/chat-knowledge`](https://github.com/M1KK3R/veebist-platform/tree/main/packages/chat-knowledge)
@@ -208,32 +228,41 @@ selection + router parsing, and CMS knowledge fetch.
 
 ## Adding chat to a new client site
 
-Two artifacts work together:
+📖 **Canonical walkthrough**: [veebist-platform/docs/chat-onboarding.md](https://github.com/M1KK3R/veebist-platform/blob/master/docs/chat-onboarding.md)
 
-1. **`@veebist/chat-widget`** (in [veebist-platform](https://github.com/M1KK3R/veebist-platform)) — the React widget the site embeds
-2. **This service** — shared infrastructure on the VPS, serves all sites via Chatwoot inboxes
+That doc covers all features in one place: widget, CMS knowledge, verified
+order/refund/gift-card lookup, URL patterns, the SQL migration Payload v3
+needs, and the env vars on both the bot host and the per-site host.
 
-Per-site steps (also automated by `scripts/onboard-site.mjs`):
+Quick reference for the bot-host side only (run `scripts/onboard-site.mjs`
+first to create the Chatwoot inbox interactively):
 
-```bash
-# 1. interactive: creates inbox, assigns bot, collaborator, knowledge template
-node scripts/onboard-site.mjs
-
-# 2. in the new site's package.json
-"@veebist/chat-widget": "file:../../veebist-platform/packages/chat-widget"
-
-# 3. in the new site's root layout
-import { ChatwootWidget } from '@veebist/chat-widget'
-<ChatwootWidget />
-
-# 4. set two env vars on the site's build
-NEXT_PUBLIC_CHATWOOT_BASE_URL=https://chat.veebist.cloud
-NEXT_PUBLIC_CHATWOOT_WEBSITE_TOKEN=<copied from inbox settings>
+```
+# Per-site env in ~/stacks/chatwoot/.env (one block per client)
+ACME_DISPLAY_NAME=Acme OÜ
+ACME_LOCALE=et
+ACME_SITE_URL=https://acme.veebist.cloud           # ← required; else products render without URLs
+ACME_MEDUSA_URL=https://acme.veebist.cloud/medusa
+ACME_MEDUSA_PUBLISHABLE_KEY=pk_…
+ACME_PAYLOAD_URL=https://acme.veebist.cloud/api
+ACME_CONTACT_EMAIL=info@acme.ee
+ACME_CONTACT_PHONE=+372…
+ACME_FEATURE_ORDER_LOOKUP=false                    # flip true after mounting @veebist/chat-api routes
+ACME_FEATURE_GIFTCARD_VALIDATION=false             # opt-in; yes/no only, rate-limited
+ACME_KNOWLEDGE_STRATEGY=auto                       # auto | snapshot | retriever
+ACME_URL_PATTERN_PRODUCT=/pood/{handle}            # override if site uses different paths
+ACME_URL_PATTERN_ARTICLE=/blogi/{slug}
+ACME_URL_PATTERN_PAGE=/lehed/{slug}
 ```
 
-That's it. Visitor chat works immediately; the bot routes through Claude
-(or Codex on failover). Knowledge is hand-curated at `bot/knowledge/<slug>.md`
-and reloaded every 5 min — no restart needed.
+Plus one shared bearer across all sites + the bot:
+
+```
+CHAT_API_TOKEN=<32-byte hex; same value on bot + every site .env>
+```
+
+Bot detects new sites automatically — no code change. The `listSiteKeys()`
+helper scans env for `<SITE>_MEDUSA_URL` or `<SITE>_PAYLOAD_URL`.
 
 ## Chatwoot v4 + Captain agent AI
 
